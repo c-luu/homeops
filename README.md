@@ -1,47 +1,154 @@
 # HomeOps
 
 HomeOps is a modular personal operations monorepo for reusable CLI utilities,
-automation workflows, and device integrations. The initial module focuses on
-read-only-first verification of Google Pixel video backups on macOS, followed
-by explicitly authorized cleanup.
+automation workflows, device integrations, validation, and other personal
+operations. Each capability uses shared HomeOps tooling rather than a
+separate repository. The Android backup workflow below is the initial module,
+not the definition of HomeOps as a whole.
 
 ## Status
 
-The initial Python 3.12+ CLI foundation is under development. Verification
-uses recursive local inventory, SHA-256 matching, and JSON/text reports.
-Cleanup remains fail-closed and does not perform permanent deletion.
+The initial Python 3.12+ CLI foundation and Pixel-to-macOS backup workflow are
+under development. Verification uses recursive inventory, SHA-256 matching,
+and JSON/text reports. Cleanup remains fail-closed, defaults to dry-run, and
+requires explicit acknowledgement before permanent deletion.
 
-## Install
+## Setup
+
+### Responsibilities and dependencies
+
+HomeOps declares Python package dependencies in `pyproject.toml`. Workstation
+prerequisites belong in `mac-dotfiles`, because that repository owns Homebrew
+Bundle manifests and machine bootstrap:
+
+- `mac-dotfiles/Brewfile` should provide the supported Python runtime, and its
+  selected Brew Bundle manifest should provide the
+  `android-platform-tools` cask (`adb`) on each Mac.
+- HomeOps does not install Homebrew packages, change USB debugging
+  authorization, or alter device permissions.
+- The HomeOps Python environment is created locally from repository metadata;
+  `.venv` is machine-specific and must not be copied between Macs.
+
+The current workflow requires Python 3.12+, the Homebrew
+`android-platform-tools` cask (Android SDK Platform-Tools, which provides
+`adb`), a USB-connected Pixel with USB debugging enabled, and a readable
+LocalSend backup directory.
+
+The corresponding `mac-dotfiles` manifest entries are expected to be
+equivalent to:
+
+```ruby
+brew "python@3.12"
+cask "android-platform-tools"
+```
+
+Use the manifest selected by the workstation profile and verify formula names
+against the current Homebrew catalog before adding them. These are machine
+prerequisites, not HomeOps Python dependencies.
 
 ```bash
+# Run mac-dotfiles workstation bootstrap first, including platform-tools and
+# the supported Python Brew dependencies.
+brew bundle install --no-upgrade --file=/path/to/mac-dotfiles/Brewfile
+
+# Then create an isolated environment in this checkout.
 python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
 homeops --help
 ```
 
-ADB is an external prerequisite. HomeOps does not install packages, change
-device permissions, or modify media during diagnostics and verification.
+If the Mac uses another supported Python executable, substitute it for
+`python3.12`; do not reuse a `.venv` created on another machine.
 
-## Configuration and verification
+## Pixel backup verification and cleanup
 
-Copy `examples/config.toml` and set a machine-specific backup destination:
+This is the setup and operating procedure for the initial Android module. It
+is intentionally separate from the general HomeOps description so future
+operations tools can add their own workflows without making Android a
+top-level assumption.
+
+### 1. Configure the LocalSend destination
+
+```bash
+cp examples/config.toml config.toml
+$EDITOR config.toml
+```
+
+Set `backups.pixel.destination` to the actual LocalSend folder on the Mac
+mini. The profile searches configured Android shared-storage roots recursively;
+do not assume the selected video count equals the successful backup count.
+
+### 2. Connect and diagnose the Pixel
+
+Unlock the phone, connect it over USB, enable USB debugging, and accept the
+authorization prompt on the phone:
 
 ```bash
 homeops doctor
 homeops android devices
-homeops android backup verify --profile pixel --config config.toml
-homeops android cleanup plan --report verification-report.json
-# Review the plan, then use --execute only with explicit permanent acknowledgement.
-homeops android cleanup apply --plan cleanup-plan.json --config config.toml \
-  --confirm --permanent --acknowledge-permanent --execute
 ```
 
+Continue only when exactly one device is authorized.
+
+### 3. Run read-only verification
+
+```bash
+homeops android backup verify \
+  --profile pixel \
+  --config config.toml \
+  --output verification-report.json
+```
+
+Review `verification-report.json` and `verification-report.txt`. Only files
+with one unambiguous Mac backup and equal SHA-256 hashes are eligible for
+cleanup. Missing, inaccessible, changed, duplicate, and ambiguous files
+remain ineligible.
+
+### 4. Generate and review a cleanup plan
+
+```bash
+homeops android cleanup plan \
+  --report verification-report.json \
+  --output cleanup-plan.json
+```
+
+Review every source and destination in `cleanup-plan.json`. Plan generation
+does not delete anything.
+
+### 5. Run the default dry-run
+
+```bash
+homeops android cleanup apply \
+  --plan cleanup-plan.json \
+  --config config.toml \
+  --confirm
+```
+
+Before execution, HomeOps revalidates the Pixel source size and SHA-256 hash
+and the Mac destination size and SHA-256 hash. A disconnect or change stops
+cleanup rather than silently treating the file as safe.
+
+### 6. Explicit permanent cleanup
+
+The current ADB integration has no verified recoverable Trash operation.
+Deletion is therefore permanent and requires separate acknowledgement:
+
+```bash
+homeops android cleanup apply \
+  --plan cleanup-plan.json \
+  --config config.toml \
+  --confirm \
+  --permanent \
+  --acknowledge-permanent \
+  --execute
+```
+
+Use this only after reviewing the plan and dry-run. Per-file results are
+persisted beside the plan as `cleanup-plan.result.json`; interrupted or failed
+operations must be reviewed and revalidated before retry.
+
 Reports and plans are local operational data and must not be committed.
-Cleanup is dry-run by default. The current ADB integration has no supported
-recoverable Trash operation, so execution requires explicit acknowledgement
-that deleting Pixel files is permanent. Before each deletion, HomeOps
-revalidates the Android size and SHA-256 hash and the Mac destination hash.
 
 The current Android compatibility target is standard `adb devices`, `find`,
 `stat`, and `sha256sum` behavior. Unsupported output or unavailable commands

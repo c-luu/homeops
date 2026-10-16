@@ -1,0 +1,24 @@
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+verification-report.json
+verification-report.txt
+cleanup-plan.json
+
+# Local charter is migration material for the future private bundle workflow.
+CHARTER.md
+
+# OpenSpec is local-only; preserve only approved placeholders.
+openspec/**
+!openspec/.gitkeep
+!openspec/specs/
+openspec/specs/*
+!openspec/specs/.gitkeep
+!openspec/changes/
+openspec/changes/*
+!openspec/changes/.gitkeep
+!openspec/changes/archive/
+openspec/changes/archive/*
+!openspec/changes/archive/.gitkeep

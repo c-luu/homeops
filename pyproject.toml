@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "homeops"
+version = "0.1.0"
+description = "Personal operations utilities for safe, reproducible device workflows"
+requires-python = ">=3.12"
+dependencies = ["typer>=0.12,<1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+homeops = "homeops.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/homeops"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+lint.ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

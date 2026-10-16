@@ -1,0 +1,9 @@
+[defaults]
+dry_run = true
+verification = "sha256"
+delete_mode = "disabled"
+
+[backups.pixel]
+destination = "~/Movies/LocalSend"
+recursive = true
+roots = ["DCIM", "Movies", "Pictures", "Download"]

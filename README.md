@@ -10,8 +10,8 @@ not the definition of HomeOps as a whole.
 
 The initial Python 3.12+ CLI foundation and Pixel-to-macOS backup workflow are
 under development. Verification uses recursive inventory, SHA-256 matching,
-and JSON/text reports. Cleanup remains fail-closed, defaults to dry-run, and
-requires explicit acknowledgement before permanent deletion.
+and managed JSON/text reports. Cleanup remains fail-closed, defaults to
+dry-run, and requires explicit acknowledgement before permanent deletion.
 
 ## Setup
 
@@ -19,11 +19,10 @@ requires explicit acknowledgement before permanent deletion.
 
 HomeOps declares Python package dependencies in `pyproject.toml`. Workstation
 prerequisites belong in `mac-dotfiles`, because that repository owns Homebrew
-Bundle manifests and machine bootstrap:
+Bundle manifests, machine bootstrap, and the optional end-user installation:
 
-- `mac-dotfiles/Brewfile` should provide the supported Python runtime, and its
-  selected Brew Bundle manifest should provide the
-  `android-platform-tools` cask (`adb`) on each Mac.
+- `mac-dotfiles/Brewfile.homeops` provides optional `uv` and
+  `android-platform-tools` prerequisites.
 - HomeOps does not install Homebrew packages, change USB debugging
   authorization, or alter device permissions.
 - The HomeOps Python environment is created locally from repository metadata;
@@ -68,85 +67,60 @@ is intentionally separate from the general HomeOps description so future
 operations tools can add their own workflows without making Android a
 top-level assumption.
 
-### 1. Configure the LocalSend destination
+### One-time Pixel setup
+
+Use the installed CLI without activating a project virtual environment:
 
 ```bash
-cp examples/config.toml config.toml
-$EDITOR config.toml
+mkdir -p "$HOME/Library/Application Support/HomeOps/backup"
+homeops android setup \
+  --destination "$HOME/Library/Application Support/HomeOps/backup"
 ```
 
-Set `backups.pixel.destination` to the actual LocalSend folder on the Mac
-mini. The profile searches configured Android shared-storage roots recursively;
-do not assume the selected video count equals the successful backup count.
+Setup discovers exactly one authorized device and writes a local TOML profile.
+The destination is the directory populated by LocalSend. Device identifiers,
+paths, reports, and plans remain local runtime data.
 
-### 2. Connect and diagnose the Pixel
+### Verify a backup
 
 Unlock the phone, connect it over USB, enable USB debugging, and accept the
-authorization prompt on the phone:
+authorization prompt. Then run:
 
 ```bash
-homeops doctor
-homeops android devices
+homeops android backup verify
 ```
 
-Continue only when exactly one device is authorized.
+Review the managed JSON and text reports under
+`~/Library/Application Support/HomeOps`. Only files with one unambiguous Mac
+backup and equal SHA-256 hashes are eligible for cleanup. Missing,
+inaccessible, changed, duplicate, and ambiguous files remain ineligible.
 
-### 3. Run read-only verification
+### Plan and apply cleanup
 
 ```bash
-homeops android backup verify \
-  --profile pixel \
-  --config config.toml \
-  --output verification-report.json
+homeops android cleanup plan
+homeops android cleanup apply
 ```
 
-Review `verification-report.json` and `verification-report.txt`. Only files
-with one unambiguous Mac backup and equal SHA-256 hashes are eligible for
-cleanup. Missing, inaccessible, changed, duplicate, and ambiguous files
-remain ineligible.
-
-### 4. Generate and review a cleanup plan
-
-```bash
-homeops android cleanup plan \
-  --report verification-report.json \
-  --output cleanup-plan.json
-```
-
-Review every source and destination in `cleanup-plan.json`. Plan generation
-does not delete anything.
-
-### 5. Run the default dry-run
+Plan review is separate from deletion. Apply defaults to a dry-run and
+revalidates the exact device, authorized Android source path, and source and
+destination size/digest immediately before every action. Permanent cleanup is
+disabled unless the profile explicitly uses `delete_mode = "permanent"` and
+the user supplies the advanced approvals:
 
 ```bash
 homeops android cleanup apply \
-  --plan cleanup-plan.json \
-  --config config.toml \
-  --confirm
-```
-
-Before execution, HomeOps revalidates the Pixel source size and SHA-256 hash
-and the Mac destination size and SHA-256 hash. A disconnect or change stops
-cleanup rather than silently treating the file as safe.
-
-### 6. Explicit permanent cleanup
-
-The current ADB integration has no verified recoverable Trash operation.
-Deletion is therefore permanent and requires separate acknowledgement:
-
-```bash
-homeops android cleanup apply \
-  --plan cleanup-plan.json \
-  --config config.toml \
-  --confirm \
   --permanent \
   --acknowledge-permanent \
+  --confirm \
   --execute
 ```
 
-Use this only after reviewing the plan and dry-run. Per-file results are
-persisted beside the plan as `cleanup-plan.result.json`; interrupted or failed
-operations must be reviewed and revalidated before retry.
+Use this only after reviewing the plan and dry-run. Per-file results and
+checkpoints are kept in the local state directory. Disconnects, changed files,
+uncertain deletion outcomes, and incomplete results fail closed; advanced
+`--config`, `--output`, `--report`, and `--plan` options remain available for
+scripting and troubleshooting.
 
 Reports and plans are local operational data and must not be committed.
 
@@ -162,6 +136,16 @@ machine configuration. HomeOps owns reusable application logic, CLI tools,
 device operations, validation, automation, and tests. Future iOS, Linux,
 NAS/storage, networking, and homelab capabilities are backlog only and are
 not implemented by the initial module.
+
+## Existing VS Code workspace
+
+The current multi-root workspace is an editing convenience, not a deployment
+system. It contains the independent roots `homeops` and `../mac-dotfiles`
+relative to the workspace file. On another Mac, clone the repositories as
+sibling directories, or manually recreate an equivalent workspace with those
+relative paths. Do not put credentials, device identifiers, runtime state, or
+OpenSpec planning files in the workspace. Additional independently maintained
+repositories can be added later without merging these two repositories.
 
 ### Future local OpenSpec Git-bundle archival
 

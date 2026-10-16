@@ -12,6 +12,7 @@ def write_report(
     *,
     device: str | None = None,
     destination_root: Path | None = None,
+    source_roots: Iterable[str] = (),
 ) -> None:
     entries = list(results)
     payload = {
@@ -19,6 +20,7 @@ def write_report(
         "created_at": datetime.now(UTC).isoformat(),
         "device": device or "[redacted]",
         "destination_root": str(destination_root.resolve()) if destination_root else None,
+        "source_roots": list(source_roots),
         "summary": {
             "total": len(entries),
             "verified": sum(entry["status"] == "verified" for entry in entries),
@@ -32,6 +34,7 @@ def write_report(
 
 
 def write_human_report(results: Iterable[dict[str, object]], output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
     lines = ["HomeOps verification report", "==========================="]
     for entry in results:
         source = entry["source"]

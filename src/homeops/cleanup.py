@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -21,6 +22,22 @@ class PlanEntry:
 
 def create_plan(report: dict[str, object], *, destination_root: Path) -> dict[str, object]:
     entries: list[dict[str, object]] = []
+    source_roots = tuple(str(root).strip("/") for root in report.get("source_roots", []))
+    device = report.get("device")
+    if (
+        not isinstance(device, str)
+        or not device
+        or device == "[redacted]"
+        or not source_roots
+    ):
+        return {
+            "schema": "homeops.cleanup-plan.v1",
+            "verification_schema": report.get("schema"),
+            "device": device,
+            "destination_root": str(destination_root.resolve()),
+            "source_roots": list(source_roots),
+            "files": [],
+        }
     for item in report.get("files", []):
         if not isinstance(item, dict) or item.get("status") != "verified":
             continue
@@ -29,6 +46,9 @@ def create_plan(report: dict[str, object], *, destination_root: Path) -> dict[st
         if not isinstance(source, dict) or not isinstance(candidates, list) or len(candidates) != 1:
             continue
         destination = candidates[0]
+        source_path = str(source.get("path", "")) if isinstance(source, dict) else ""
+        if not _authorized_source(source_path, source_roots):
+            continue
         if not isinstance(destination, dict) or not destination.get("sha256"):
             continue
         path = Path(str(destination.get("path", "")))
@@ -45,7 +65,7 @@ def create_plan(report: dict[str, object], *, destination_root: Path) -> dict[st
             continue
         entries.append(
             {
-                "source": source.get("path"),
+                "source": source_path,
                 "destination": str(path),
                 "size": stat.st_size,
                 "sha256": destination["sha256"],
@@ -56,8 +76,21 @@ def create_plan(report: dict[str, object], *, destination_root: Path) -> dict[st
         "verification_schema": report.get("schema"),
         "device": report.get("device"),
         "destination_root": str(destination_root.resolve()),
+        "source_roots": list(source_roots),
         "files": entries,
     }
+
+
+def _authorized_source(path: str, roots: tuple[str, ...]) -> bool:
+    normalized = posixpath.normpath(path)
+    if not normalized.startswith("/sdcard/") or "\x00" in normalized:
+        return False
+    if not roots:
+        return True
+    return any(
+        normalized == f"/sdcard/{root}" or normalized.startswith(f"/sdcard/{root}/")
+        for root in roots
+    )
 
 
 def _hash(path: Path) -> str:
@@ -74,6 +107,10 @@ def revalidate(
     source_check: Callable[[str, int, str], bool],
 ) -> list[PlanEntry]:
     root = Path(str(plan.get("destination_root", ""))).resolve()
+    source_roots = tuple(str(root).strip("/") for root in plan.get("source_roots", []))
+    device = plan.get("device")
+    if "device" in plan and device in {None, "", "[redacted]"}:
+        raise CleanupError("cleanup plan has no exact Android device identity")
     entries: list[PlanEntry] = []
     for raw in plan.get("files", []):
         if not isinstance(raw, dict):
@@ -86,6 +123,8 @@ def revalidate(
             if destination.stat().st_size != size or _hash(destination) != expected:
                 raise CleanupError(f"destination changed: {destination}")
             source = str(raw["source"])
+            if not _authorized_source(source, source_roots):
+                raise CleanupError(f"source path is outside configured roots: {source}")
             if not source_check(source, size, expected):
                 raise CleanupError(f"source failed revalidation: {source}")
         except (KeyError, OSError, ValueError) as exc:

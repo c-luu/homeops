@@ -46,3 +46,34 @@ def test_cleanup_executes_only_after_permanent_acknowledgement(tmp_path: Path) -
     )
     assert results[0]["status"] == "deleted"
     assert deleted == ["/sdcard/DCIM/backup.mp4"]
+
+
+def test_uncertain_delete_stops_and_requires_fresh_plan(tmp_path: Path) -> None:
+    destination = tmp_path / "backup.mp4"
+    destination.write_bytes(b"video")
+    digest = sha256(b"video").hexdigest()
+    plan = {
+        "destination_root": str(tmp_path),
+        "files": [{"source": "/sdcard/DCIM/backup.mp4", "destination": str(destination), "size": 5, "sha256": digest}],
+    }
+    result_path = tmp_path / "result.json"
+    results = apply_plan(
+        plan,
+        result_path,
+        source_check=lambda *_: True,
+        delete_source=lambda _: (_ for _ in ()).throw(RuntimeError("disconnect")),
+        confirm=True,
+        permanent_acknowledged=True,
+        dry_run=False,
+    )
+    assert results[0]["status"] == "unknown"
+    with pytest.raises(CleanupError, match="uncertain"):
+        apply_plan(
+            plan,
+            result_path,
+            source_check=lambda *_: True,
+            delete_source=lambda _: None,
+            confirm=True,
+            permanent_acknowledged=True,
+            dry_run=False,
+        )

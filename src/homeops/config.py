@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .state import resolve_config_path
+
 
 class ConfigError(ValueError):
     """Raised when configuration is missing or unsafe."""
@@ -35,7 +37,7 @@ def _path(value: str) -> Path:
 
 
 def load_config(path: Path | None = None, *, profile: str = "pixel") -> tuple[Config, str]:
-    source = path or Path("examples/config.toml")
+    source = resolve_config_path(path)
     if not source.exists():
         if path:
             raise ConfigError(f"configuration file does not exist: {source}")
@@ -67,3 +69,30 @@ def load_config(path: Path | None = None, *, profile: str = "pixel") -> tuple[Co
         verification=str(defaults.get("verification", "sha256")),
         profiles=profiles,
     ), str(source)
+
+
+def write_config(
+    path: Path,
+    *,
+    destination: Path,
+    roots: tuple[str, ...],
+    delete_mode: str,
+    recursive: bool = True,
+) -> None:
+    if delete_mode not in {"disabled", "trash", "permanent"}:
+        raise ConfigError(f"unsupported delete_mode: {delete_mode}")
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "[defaults]",
+        "dry_run = true",
+        'verification = "sha256"',
+        f'delete_mode = "{delete_mode}"',
+        "",
+        "[backups.pixel]",
+        f'destination = "{destination}"',
+        f"recursive = {str(recursive).lower()}",
+        f"roots = [{', '.join(repr(root) for root in roots)}]",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")

@@ -39,3 +39,25 @@ def test_cleanup_plan_rejects_changed_destination(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("changed destination must be rejected")
+
+
+def test_cleanup_plan_requires_exact_device_and_authorized_source(tmp_path: Path) -> None:
+    destination = tmp_path / "clip.mp4"
+    destination.write_bytes(b"video")
+    digest = __import__("hashlib").sha256(b"video").hexdigest()
+    report = {
+        "schema": "homeops.verification.v1",
+        "device": "pixel",
+        "source_roots": ["DCIM"],
+        "files": [
+            {
+                "status": "verified",
+                "source": {"path": "/sdcard/Download/clip.mp4"},
+                "candidates": [{"path": str(destination), "size": 5, "sha256": digest}],
+            }
+        ],
+    }
+    assert create_plan(report, destination_root=tmp_path)["files"] == []
+
+    report["device"] = "[redacted]"
+    assert create_plan(report, destination_root=tmp_path)["files"] == []

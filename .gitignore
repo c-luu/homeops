@@ -6,6 +6,7 @@ __pycache__/
 verification-report.json
 verification-report.txt
 cleanup-plan.json
+config.toml
 
 # Local charter is migration material for the future private bundle workflow.
 CHARTER.md

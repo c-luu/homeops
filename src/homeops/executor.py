@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,8 +22,31 @@ def apply_plan(
     if not dry_run and not permanent_acknowledged:
         raise CleanupError("permanent deletion requires separate acknowledgement")
     entries = revalidate(plan, source_check=source_check)
+    completed: set[tuple[str, str]] = set()
+    if result_path.exists():
+        try:
+            prior = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CleanupError(f"invalid existing cleanup result: {result_path}") from exc
+        if not prior.get("complete", False):
+            prior_files = prior.get("files", [])
+            if any(
+                isinstance(item, dict) and item.get("status") in {"failed", "unknown"}
+                for item in prior_files
+            ):
+                raise CleanupError("cleanup result contains an uncertain outcome; create a fresh plan")
+        completed = {
+            (str(item.get("source")), str(item.get("destination")))
+            for item in prior.get("files", [])
+            if isinstance(item, dict) and item.get("status") == "deleted"
+        }
     results: list[dict[str, object]] = []
     for entry in entries:
+        if (entry.source, entry.destination) in completed:
+            results.append(
+                {"source": entry.source, "destination": entry.destination, "status": "already-deleted"}
+            )
+            continue
         result: dict[str, object] = {"source": entry.source, "destination": entry.destination}
         if dry_run:
             result["status"] = "dry-run"
@@ -30,11 +54,11 @@ def apply_plan(
             try:
                 delete_source(entry.source)
             except (OSError, RuntimeError, CleanupError) as exc:
-                result["status"] = "failed"
+                result["status"] = "unknown"
                 result["error"] = str(exc)
                 results.append(result)
                 persist_result(result_path, results, complete=False)
-                continue
+                return results
             result["status"] = "deleted"
         results.append(result)
         persist_result(result_path, results, complete=False)

@@ -1,5 +1,7 @@
 from subprocess import CompletedProcess
 
+import pytest
+
 from homeops.adb import Adb
 
 
@@ -27,3 +29,8 @@ def test_remote_inventory_uses_argument_vector() -> None:
     assert files[0].path.endswith("clip one.mp4")
     assert files[0].size == 12
     assert all(isinstance(arg, str) for call in calls for arg in call)
+
+
+def test_delete_rejects_paths_outside_shared_storage() -> None:
+    with pytest.raises(Exception, match="unsafe"):
+        Adb(runner=lambda *args, **kwargs: None).delete_file("serial", "/data/local/tmp/file")

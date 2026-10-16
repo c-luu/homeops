@@ -24,3 +24,25 @@ def test_cleanup_requires_confirmation_and_can_dry_run(tmp_path: Path) -> None:
     }
     with pytest.raises(CleanupError, match="confirmation"):
         apply_plan(plan, tmp_path / "result.json", source_check=lambda *_: True, delete_source=lambda _: None, confirm=False, permanent_acknowledged=False)
+
+
+def test_cleanup_executes_only_after_permanent_acknowledgement(tmp_path: Path) -> None:
+    destination = tmp_path / "backup.mp4"
+    destination.write_bytes(b"video")
+    digest = sha256(b"video").hexdigest()
+    plan = {
+        "destination_root": str(tmp_path),
+        "files": [{"source": "/sdcard/DCIM/backup.mp4", "destination": str(destination), "size": 5, "sha256": digest}],
+    }
+    deleted: list[str] = []
+    results = apply_plan(
+        plan,
+        tmp_path / "result.json",
+        source_check=lambda *_: True,
+        delete_source=deleted.append,
+        confirm=True,
+        permanent_acknowledged=True,
+        dry_run=False,
+    )
+    assert results[0]["status"] == "deleted"
+    assert deleted == ["/sdcard/DCIM/backup.mp4"]

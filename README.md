@@ -32,9 +32,16 @@ homeops doctor
 homeops android devices
 homeops android backup verify --profile pixel --config config.toml
 homeops android cleanup plan --report verification-report.json
+# Review the plan, then use --execute only with explicit permanent acknowledgement.
+homeops android cleanup apply --plan cleanup-plan.json --config config.toml \
+  --confirm --permanent --acknowledge-permanent --execute
 ```
 
 Reports and plans are local operational data and must not be committed.
+Cleanup is dry-run by default. The current ADB integration has no supported
+recoverable Trash operation, so execution requires explicit acknowledgement
+that deleting Pixel files is permanent. Before each deletion, HomeOps
+revalidates the Android size and SHA-256 hash and the Mac destination hash.
 
 The current Android compatibility target is standard `adb devices`, `find`,
 `stat`, and `sha256sum` behavior. Unsupported output or unavailable commands

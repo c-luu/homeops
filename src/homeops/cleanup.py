@@ -54,6 +54,7 @@ def create_plan(report: dict[str, object], *, destination_root: Path) -> dict[st
     return {
         "schema": "homeops.cleanup-plan.v1",
         "verification_schema": report.get("schema"),
+        "device": report.get("device"),
         "destination_root": str(destination_root.resolve()),
         "files": entries,
     }

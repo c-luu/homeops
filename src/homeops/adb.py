@@ -82,6 +82,7 @@ class Adb:
         return files
 
     def hash_file(self, serial: str, path: str) -> str:
+        self._validate_media_path(path)
         result = self.runner(
             [self.executable, "-s", serial, "shell", "sha256sum", path],
             capture_output=True,
@@ -94,3 +95,19 @@ class Adb:
         if len(digest) != 64:
             raise AdbError(f"invalid SHA-256 response for remote file: {path}")
         return digest
+
+    def file_size(self, serial: str, path: str) -> int:
+        self._validate_media_path(path)
+        try:
+            return int(self.shell(serial, ["stat", "-c", "%s", path]).strip())
+        except ValueError as exc:
+            raise AdbError(f"invalid size response for remote file: {path}") from exc
+
+    def delete_file(self, serial: str, path: str) -> None:
+        self._validate_media_path(path)
+        self.shell(serial, ["rm", "--", path])
+
+    @staticmethod
+    def _validate_media_path(path: str) -> None:
+        if not path.startswith("/sdcard/") or "\x00" in path:
+            raise AdbError(f"unsafe Android media path: {path!r}")

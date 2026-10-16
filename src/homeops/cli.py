@@ -6,8 +6,9 @@ from pathlib import Path
 import typer
 
 from .adb import Adb, AdbError
-from .cleanup import create_plan
+from .cleanup import CleanupError, create_plan
 from .config import ConfigError, load_config
+from .executor import apply_plan
 from .media import MediaFile, hash_file, inventory_local
 from .reports import write_human_report, write_report
 
@@ -100,14 +101,50 @@ def plan(
 @cleanup.command("apply")
 def apply(
     plan: Path = typer.Option(..., "--plan"),
-    permanent: bool = typer.Option(False, "--permanent"),
+    config: Path | None = typer.Option(None, "--config"),
+    profile: str = typer.Option("pixel"),
     confirm: bool = typer.Option(False, "--confirm"),
+    permanent: bool = typer.Option(False, "--permanent"),
+    acknowledge_permanent: bool = typer.Option(False, "--acknowledge-permanent"),
+    dry_run: bool = typer.Option(True, "--dry-run/--execute"),
 ) -> None:
-    if not confirm:
-        raise typer.BadParameter("cleanup requires --confirm; no files were changed")
-    if permanent:
-        raise typer.BadParameter("permanent deletion is not enabled until trash support is verified")
-    typer.echo("No supported recoverable Android trash operation is configured; no files changed.")
+    try:
+        load_config(config, profile=profile)
+        if not confirm:
+            raise CleanupError("cleanup requires --confirm; no files were changed")
+        if not dry_run and not permanent:
+            raise CleanupError("no supported recoverable Android trash operation is configured")
+        if not dry_run and not acknowledge_permanent:
+            raise CleanupError("permanent deletion requires --acknowledge-permanent")
+        payload = json.loads(plan.read_text(encoding="utf-8"))
+        device = Adb().find_single_authorized()
+        planned_device = payload.get("device")
+        if planned_device not in {None, "[redacted]", device.serial}:
+            raise CleanupError("cleanup plan belongs to a different Android device")
+        if not payload.get("files"):
+            typer.echo("Cleanup plan contains no eligible files; no files changed.")
+            return
+
+        adb = Adb()
+
+        def source_check(path: str, size: int, digest: str) -> bool:
+            return (
+                adb.file_size(device.serial, path) == size
+                and adb.hash_file(device.serial, path) == digest
+            )
+
+        results = apply_plan(
+            payload,
+            plan.with_suffix(".result.json"),
+            source_check=source_check,
+            delete_source=lambda path: adb.delete_file(device.serial, path),
+            confirm=confirm,
+            permanent_acknowledged=acknowledge_permanent,
+            dry_run=dry_run,
+        )
+        typer.echo(f"Cleanup completed with {len(results)} result(s).")
+    except (ConfigError, CleanupError, AdbError, KeyError, OSError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 if __name__ == "__main__":

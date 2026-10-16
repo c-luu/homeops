@@ -17,40 +17,39 @@ dry-run, and requires explicit acknowledgement before permanent deletion.
 
 ### Responsibilities and dependencies
 
-HomeOps declares Python package dependencies in `pyproject.toml`. Workstation
-prerequisites belong in `mac-dotfiles`, because that repository owns Homebrew
-Bundle manifests, machine bootstrap, and the optional end-user installation:
+HomeOps declares Python package dependencies in `pyproject.toml`. The current
+end-user installation is separate from the unpublished local
+`mac-dotfiles` integration:
 
-- `mac-dotfiles/Brewfile.homeops` provides optional `uv` and
-  `android-platform-tools` prerequisites.
 - HomeOps does not install Homebrew packages, change USB debugging
   authorization, or alter device permissions.
-- The HomeOps Python environment is created locally from repository metadata;
-  `.venv` is machine-specific and must not be copied between Macs.
+- The end-user CLI is installed with `uv tool` into an isolated environment;
+  no source checkout or routine virtual-environment activation is required.
 
 The current workflow requires Python 3.12+, the Homebrew
 `android-platform-tools` cask (Android SDK Platform-Tools, which provides
 `adb`), a USB-connected Pixel with USB debugging enabled, and a readable
 LocalSend backup directory.
 
-The corresponding `mac-dotfiles` manifest entries are expected to be
-equivalent to:
-
-```ruby
-brew "python@3.12"
-cask "android-platform-tools"
-```
-
-Use the manifest selected by the workstation profile and verify formula names
-against the current Homebrew catalog before adding them. These are machine
-prerequisites, not HomeOps Python dependencies.
+For the current public checkout, install HomeOps at the reviewed immutable
+commit:
 
 ```bash
-# Run mac-dotfiles workstation bootstrap first, including platform-tools and
-# the supported Python Brew dependencies.
-brew bundle install --no-upgrade --file=/path/to/mac-dotfiles/Brewfile
+uv tool install --force \
+  git+https://github.com/c-luu/homeops.git@1eeee602f4a904dafd9d2c36f636732c25463f8c
+```
 
-# Then create an isolated environment in this checkout.
+Install `android-platform-tools` using the workstation's normal package
+manager. The optional `mac-dotfiles/Brewfile.homeops` and its installer are
+not published as part of this HomeOps installation contract; review that
+integration separately before using it.
+
+### Developer setup
+
+Only contributors working from a HomeOps source checkout need an editable
+virtual environment:
+
+```bash
 python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
@@ -69,12 +68,12 @@ top-level assumption.
 
 ### One-time Pixel setup
 
-Use the installed CLI without activating a project virtual environment:
+Point setup at the existing directory that LocalSend already uses. Setup does
+not create or initialize a backup destination:
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/HomeOps/backup"
 homeops android setup \
-  --destination "$HOME/Library/Application Support/HomeOps/backup"
+  --destination "/existing/path/to/LocalSend/backup"
 ```
 
 Setup discovers exactly one authorized device and writes a local TOML profile.

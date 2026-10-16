@@ -81,23 +81,34 @@ def verify(
     try:
         settings, _ = load_config(config, profile=profile)
         selected = settings.profiles[profile]
-        output = output or state_paths().verification_report
+        paths = _paths_for_config(config)
+        output = output or paths.verification_report
         device = Adb().find_single_authorized()
         local = inventory_local(selected.destination)
         remote = Adb().inventory(device.serial, selected.roots)
         sources = []
         for item in remote:
             source = MediaFile(item.path, Path(item.path).name, item.size, item.size is not None)
-            try:
-                source.sha256 = Adb().hash_file(device.serial, item.path)
-            except AdbError as exc:
-                source.accessible = False
-                source.error = str(exc)
             sources.append(source)
-        backups = [hash_file(item) for item in local]
+        source_sizes = {item.size for item in sources if item.accessible and item.size is not None}
+        backups = [
+            hash_file(item)
+            for item in local
+            if item.accessible and item.size in source_sizes
+        ]
         results = []
-        checkpoint = state_paths().verification_checkpoint
+        checkpoint = paths.verification_checkpoint
         for source in sources:
+            candidates_by_size = [
+                backup for backup in backups
+                if source.accessible and backup.accessible and source.size == backup.size
+            ]
+            if candidates_by_size:
+                try:
+                    source.sha256 = Adb().hash_file(device.serial, source.path)
+                except AdbError as exc:
+                    source.accessible = False
+                    source.error = str(exc)
             candidates = [
                 backup for backup in backups
                 if source.accessible and backup.accessible
@@ -121,6 +132,11 @@ def verify(
             source_roots=selected.roots,
         )
         write_human_report(results, output.with_suffix(".txt"))
+        counts = _status_counts(results)
+        typer.echo(
+            f"Matched: {counts['verified']}; unmatched: {counts['unmatched']}; "
+            f"ambiguous: {counts['ambiguous']}; cleanup-eligible: {counts['eligible']}"
+        )
         typer.echo(f"Wrote {output}")
     except (ConfigError, AdbError, KeyError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -137,8 +153,9 @@ def plan(
     data = json.loads(report.read_text(encoding="utf-8"))
     root = Path(str(data.get("destination_root", Path.cwd())))
     payload = create_plan(data, destination_root=root)
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    typer.echo(f"Wrote {output} ({len(payload['files'])} eligible file(s))")
+    typer.echo(f"Cleanup-eligible: {len(payload['files'])}; wrote {output}")
 
 
 @cleanup.command("apply")
@@ -154,13 +171,11 @@ def apply(
     try:
         settings, _ = load_config(config, profile=profile)
         selected = settings.profiles[profile]
-        plan = plan or state_paths().cleanup_plan
+        plan = plan or _paths_for_config(config).cleanup_plan
         if selected.delete_mode == "disabled" and not dry_run:
             raise CleanupError("configured deletion policy is disabled")
         if selected.delete_mode == "trash" and not dry_run:
             raise CleanupError("configured trash deletion is not supported")
-        if not confirm:
-            raise CleanupError("cleanup requires --confirm; no files were changed")
         if not dry_run and not permanent:
             raise CleanupError("no supported recoverable Android trash operation is configured")
         if not dry_run and not acknowledge_permanent:
@@ -191,9 +206,36 @@ def apply(
             permanent_acknowledged=acknowledge_permanent,
             dry_run=dry_run,
         )
-        typer.echo(f"Cleanup completed with {len(results)} result(s).")
+        counts = _status_counts(results)
+        typer.echo(
+            f"Cleanup results: dry-run {counts['dry-run']}; deleted {counts['deleted']}; "
+            f"already deleted {counts['already-deleted']}; uncertain {counts['unknown']}"
+        )
     except (ConfigError, CleanupError, AdbError, KeyError, OSError, json.JSONDecodeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+def _status_counts(results: list[dict[str, object]]) -> dict[str, int]:
+    counts = {
+        "verified": 0,
+        "unmatched": 0,
+        "ambiguous": 0,
+        "eligible": 0,
+        "dry-run": 0,
+        "deleted": 0,
+        "already-deleted": 0,
+        "unknown": 0,
+    }
+    for result in results:
+        status = str(result.get("status"))
+        if status in counts:
+            counts[status] += 1
+    counts["eligible"] = counts["verified"]
+    return counts
+
+
+def _paths_for_config(config: Path | None):
+    return state_paths(config.expanduser().parent if config else None)
 
 
 if __name__ == "__main__":

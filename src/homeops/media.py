@@ -60,14 +60,23 @@ def hash_file(item: MediaFile, chunk_size: int = 1024 * 1024) -> MediaFile:
 
 
 def match_files(sources: list[MediaFile], backups: list[MediaFile]) -> list[dict[str, object]]:
-    hashed_backups = [hash_file(item) for item in backups]
+    source_sizes = {item.size for item in sources if item.accessible and item.size is not None}
+    hashed_backups = [
+        hash_file(item)
+        for item in backups
+        if item.accessible and item.size in source_sizes
+    ]
     results: list[dict[str, object]] = []
-    for source in (hash_file(item) for item in sources):
+    for source in sources:
+        matching_size = [
+            backup for backup in hashed_backups
+            if source.accessible and backup.accessible and source.size == backup.size
+        ]
+        source = hash_file(source) if matching_size else source
         candidates = [
             backup for backup in hashed_backups
             if source.accessible and backup.accessible
             and source.size == backup.size
-            and (source.name == backup.name or source.sha256 is not None)
         ]
         same_hash = [backup for backup in candidates if backup.sha256 == source.sha256]
         status = "verified" if len(same_hash) == 1 else (

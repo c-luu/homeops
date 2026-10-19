@@ -151,3 +151,43 @@ def test_same_second_remote_mutation_is_detected():
     )
     with pytest.raises(AdbError, match="changed"):
         adb.hash_file("fixture", "/sdcard/DCIM/clip")
+
+
+@pytest.mark.parametrize("bad_known_hash", [False, True])
+def test_read_only_protocol_probe_uses_android_formats_and_known_sha256(bad_known_hash):
+    import shlex
+
+    from homeops.adb import _PROTOCOL_CHECK
+
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        assert kwargs["input"] == "/sdcard\n"
+        if args[-1] == shlex.quote(_LIST):
+            return CompletedProcess(args, 0, "DIRECTORY\x00./DCIM\x00", "")
+        assert args[-1] == shlex.quote(_PROTOCOL_CHECK)
+        known = "0" * 64 if bad_known_hash else sha256(b"homeops-protocol\n").hexdigest()
+        return CompletedProcess(
+            args,
+            0,
+            "PROTOCOL\x00"
+            + META
+            + "\x00"
+            + "a" * 64
+            + "  -\x00"
+            + META
+            + "\x00"
+            + known
+            + "  -\x00",
+            "",
+        )
+
+    adb = Adb(runner=runner)
+    if bad_known_hash:
+        with pytest.raises(AdbError, match="known-input"):
+            adb.check_protocol("fixture")
+    else:
+        adb.check_protocol("fixture")
+    assert len(calls) == 2
+    assert "rm --" not in _PROTOCOL_CHECK and "find . -type f" not in _PROTOCOL_CHECK

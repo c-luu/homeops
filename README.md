@@ -17,9 +17,9 @@ dry-run, and requires explicit acknowledgement before permanent deletion.
 
 ### Responsibilities and dependencies
 
-HomeOps declares Python package dependencies in `pyproject.toml`. The current
-end-user installation is separate from the unpublished local
-`mac-dotfiles` integration:
+HomeOps declares Python package dependencies in `pyproject.toml`. The published
+[mac-dotfiles integration](https://github.com/c-luu/mac-dotfiles) owns optional
+workstation dependencies and the end-user installer:
 
 - HomeOps does not install Homebrew packages, change USB debugging
   authorization, or alter device permissions.
@@ -31,18 +31,21 @@ The current workflow requires Python 3.12+, the Homebrew
 `adb`), a USB-connected Pixel with USB debugging enabled, and a readable
 LocalSend backup directory.
 
-For the current public checkout, install HomeOps at the reviewed immutable
-commit:
+From your mac-dotfiles checkout, select the optional prerequisites and run its
+installer:
 
 ```bash
-uv tool install --force \
-  git+https://github.com/c-luu/homeops.git@1eeee602f4a904dafd9d2c36f636732c25463f8c
+brew bundle install --no-upgrade --file=Brewfile.homeops
+./scripts/install-homeops.sh
 ```
 
-Install `android-platform-tools` using the workstation's normal package
-manager. The optional `mac-dotfiles/Brewfile.homeops` and its installer are
-not published as part of this HomeOps installation contract; review that
-integration separately before using it.
+`Brewfile.homeops` declares `uv` and `android-platform-tools`. The single reviewed
+immutable HomeOps revision lives in mac-dotfiles' `homeops-version`; it is not
+duplicated here. The installer uses an isolated `uv tool` environment and checks
+the installed Git revision. Matching installations are kept; replacing a
+different or unverifiable installation requires an explicit
+`./scripts/install-homeops.sh --upgrade`. The installation marker alone is not
+proof of the installed revision. Chezmoi does not run this installer automatically.
 
 ### Developer setup
 
@@ -65,6 +68,38 @@ This is the setup and operating procedure for the initial Android module. It
 is intentionally separate from the general HomeOps description so future
 operations tools can add their own workflows without making Android a
 top-level assumption.
+
+### Read-only first run on a Mac mini or laptop
+
+After installation, connect and unlock the Pixel and authorize USB debugging
+yourself. Leave `delete_mode = "disabled"` while checking the workflow:
+
+```bash
+homeops doctor
+```
+
+With exactly one authorized device, doctor checks the raw ADB shell, shared-storage
+path handling/NUL framing, Android stat output, and SHA-256 stdin format. It
+hashes a public system file and a fixed test string; it does not hash or change
+your videos. A missing device or unsupported protocol is reported explicitly.
+
+If this Mac has no HomeOps profile yet, use the one-time setup below with the
+**existing folder already configured in LocalSend**. Setup writes local TOML
+configuration only. If a profile already exists, inspect that local config and
+keep its destination and disabled deletion policy instead of overwriting it.
+
+Manually select Pixel videos, transfer them through LocalSend, and wait for
+their Mac copies to arrive. Then run:
+
+```bash
+homeops android cleanup --dry-run
+```
+
+Review scope, matches, ambiguities, errors, eligible originals, and estimated
+savings. This scans the whole destination, including older arrivals; optional
+`--within received-videos` restricts candidates to that existing relative
+subfolder. The mini and each laptop use their own local destination/profile.
+This first-run path performs no Pixel deletion and never changes Mac media.
 
 ### One-time Pixel setup
 
@@ -251,8 +286,13 @@ parent enumeration proves optional-directory absence; a failed existence test
 does not. Remote stat identity, size, mode, and fractional modification/change
 timestamps (`%y`/`%z` as well as epoch times) bracket SHA-256 reads; unsupported
 stat formats fail closed. Local reads check opened file identity and metadata
-as well. Tests use synthetic files and mocked ADB;
-no physical device is required.
+as well. The protocol follows the primary AOSP [ADB shell contract](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/user/adb.1.md),
+[Toybox stat implementation](https://android.googlesource.com/platform/external/toybox/+/refs/heads/main/toys/other/stat.c),
+[timestamp formatter](https://android.googlesource.com/platform/external/toybox/+/refs/heads/main/lib/lib.c),
+and [checksum implementation](https://android.googlesource.com/platform/external/toybox/+/refs/heads/main/toys/lsb/md5sum.c).
+Automated tests use synthetic files, mocked ADB, and local shell quoting checks;
+they do not prove compatibility with a particular attached Pixel. Run the
+read-only `homeops doctor` probe on that device before verification.
 
 ## Repository boundaries
 

@@ -1,6 +1,8 @@
 import json
 
 import pytest
+import typer.rich_utils
+from rich.text import Text
 from test_verification import FakeAdb
 from typer.testing import CliRunner
 
@@ -60,10 +62,16 @@ def test_advanced_verify_plan_and_dry_apply_keep_config_context(tmp_path, monkey
         assert result.exit_code == 0, result.output
 
 
-def test_help_never_runs_verification(monkeypatch):
+@pytest.mark.parametrize("color", [False, True])
+def test_help_never_runs_verification(monkeypatch, color):
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", color)
+    monkeypatch.setattr(typer.rich_utils, "COLOR_SYSTEM", "standard" if color else None)
     monkeypatch.setattr("homeops.cli.Adb", lambda: pytest.fail("help is read-only"))
-    result = CliRunner().invoke(app, ["android", "cleanup", "--help"])
-    assert result.exit_code == 0 and "--within" in result.output
+    result = CliRunner().invoke(app, ["android", "cleanup", "--help"], color=color)
+    assert result.exit_code == 0
+    if color:
+        assert "\x1b[" in result.output
+    assert "--within" in Text.from_ansi(result.output).plain
 
 
 def test_genuine_coverage_error_shows_zero_eligibility(tmp_path, monkeypatch):

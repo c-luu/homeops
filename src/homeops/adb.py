@@ -7,6 +7,7 @@ import stat
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 
 from .media import DIGEST
 
@@ -105,6 +106,21 @@ IFS= read -r expected || exit 91
 current=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$path") || exit 87
 [ "$current" = "$expected" ] || exit 90
 rm -- "$path"
+"""
+)
+
+# Probe actual Android/Toybox behavior without changing or hashing user media.
+_PROTOCOL_CHECK = (
+    _READ_PATH
+    + r"""
+target=/system/build.prop
+[ -f "$target" ] && [ -r "$target" ] || exit 92
+before=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$target") || exit 87
+digest=$(sha256sum < "$target") || exit 88
+after=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$target") || exit 89
+[ "$before" = "$after" ] || exit 90
+known=$(printf 'homeops-protocol\n' | sha256sum) || exit 88
+printf 'PROTOCOL\000%s\000%s\000%s\000%s\000' "$before" "$digest" "$after" "$known"
 """
 )
 
@@ -230,6 +246,20 @@ class Adb:
         if any(root["status"] == "error-incomplete" for root in result.coverage):
             raise AdbError("Android inventory is incomplete; inspect configured roots and access")
         return result.files
+
+    def check_protocol(self, serial: str) -> None:
+        """Read-only preflight: shared-storage framing and a public system-file hash."""
+        self._paths(serial, "/sdcard", recursive=False)
+        parts = self._program(serial, _PROTOCOL_CHECK, "/sdcard").split("\x00")
+        if len(parts) != 6 or parts[0] != "PROTOCOL" or parts[-1] or parts[1] != parts[3]:
+            raise AdbError("unsupported or unstable Android protocol probe response")
+        self._metadata(parts[1])
+        for raw in (parts[2], parts[4]):
+            fields = raw.split()
+            if len(fields) != 2 or fields[1] != "-" or not DIGEST.fullmatch(fields[0]):
+                raise AdbError("unsupported Android SHA-256 stdin format")
+        if parts[4].split()[0] != sha256(b"homeops-protocol\n").hexdigest():
+            raise AdbError("Android SHA-256 known-input check failed")
 
     @staticmethod
     def _metadata(raw: str) -> tuple[int, ...]:

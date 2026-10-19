@@ -29,8 +29,16 @@ android.add_typer(cleanup, name="cleanup")
 def doctor() -> None:
     """Report local prerequisites without changing the system."""
     try:
-        devices = Adb().devices()
+        adb = Adb()
+        devices = adb.devices()
         typer.echo(f"ADB: available ({len(devices)} device(s))")
+        if len(devices) == 1 and devices[0].state == "device":
+            adb.check_protocol(devices[0].serial)
+            typer.echo(
+                "Android shell protocol: compatible (read-only system-file probe; no video reads)"
+            )
+        else:
+            typer.echo("Android shell protocol: not checked; connect exactly one authorized Pixel.")
     except AdbError as exc:
         typer.echo(f"ADB: {exc}")
     typer.echo(f"Python: {__import__('sys').version.split()[0]}")

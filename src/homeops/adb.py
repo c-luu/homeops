@@ -109,20 +109,66 @@ rm -- "$path"
 """
 )
 
-# Probe actual Android/Toybox behavior without changing or hashing user media.
+# Metadata requires stat access, not permission to read a system file's contents.
+# SHA-256 is checked independently using known, non-personal stdin data.
 _PROTOCOL_CHECK = (
     _READ_PATH
     + r"""
-target=/system/build.prop
-[ -f "$target" ] && [ -r "$target" ] || exit 92
-before=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$target") || exit 87
-digest=$(sha256sum < "$target") || exit 88
-after=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$target") || exit 89
-[ "$before" = "$after" ] || exit 90
+sample=
+failure=
+for candidate in /system/bin/toybox /system/bin/sh /system/bin/mksh; do
+    test -f "$candidate" || continue
+    if ! target=$(realpath -- "$candidate" 2>&1); then
+        failure="system metadata sample: realpath: $target"
+        continue
+    fi
+    if ! sample=$(stat -c '%d:%i:%s:%Y:%Z:%f|%y|%z' -- "$target" 2>&1); then
+        failure="system metadata sample: stat: $sample"
+        sample=
+        continue
+    fi
+    break
+done
+if [ -z "$sample" ]; then
+    if [ -n "$failure" ]; then
+        printf '%s\n' "$failure" >&2
+        exit 87
+    fi
+    exit 92
+fi
 known=$(printf 'homeops-protocol\n' | sha256sum) || exit 88
-printf 'PROTOCOL\000%s\000%s\000%s\000%s\000' "$before" "$digest" "$after" "$known"
+printf 'PROTOCOL\000%s\000%s\000' "$sample" "$known"
 """
 )
+
+
+def _command_failure(operation: str, result: subprocess.CompletedProcess[str]) -> AdbError:
+    reasons = {
+        80: "missing path input",
+        81: "shared storage is inaccessible",
+        82: "path resolution failed",
+        83: "canonical path safety check failed",
+        84: "directory is unavailable or access permission is denied",
+        85: "could not enter directory",
+        86: "file is unavailable, non-regular, or a symlink",
+        87: "metadata stat or system sample resolution failed",
+        88: "SHA-256 command failed",
+        89: "post-hash metadata stat failed",
+        90: "file changed; metadata revalidation failed",
+        91: "missing expected metadata",
+        92: "no available regular system file for metadata probe",
+        126: "command could not be executed; check permissions and executable format",
+        127: "required command is unavailable",
+    }
+    if result.returncode:
+        reason = reasons.get(result.returncode, "command or ADB transport failure")
+        status = f"failed (exit {result.returncode}: {reason})"
+    else:
+        status = "reported stderr (exit 0; response rejected)"
+    detail = result.stderr.strip() or "no stderr"
+    if "permission denied" in detail.lower():
+        detail = "permission failure: " + detail
+    return AdbError(f"{operation} {status}: {detail}")
 
 
 class Adb:
@@ -142,7 +188,7 @@ class Adb:
         except OSError as exc:
             raise AdbError(f"ADB is unavailable: {exc}") from exc
         if result.returncode:
-            raise AdbError(result.stderr.strip() or "ADB device discovery failed")
+            raise _command_failure("ADB device discovery", result)
         devices = []
         for line in result.stdout.splitlines():
             if not line.strip() or line.startswith("List of devices"):
@@ -190,7 +236,15 @@ class Adb:
         except OSError as exc:
             raise AdbError(f"ADB operation failed: {exc}") from exc
         if result.returncode or result.stderr:
-            raise AdbError(result.stderr.strip() or "unsupported or failed Android command")
+            operation = {
+                _LIST: "Android directory enumeration",
+                _INVENTORY: "Android media inventory",
+                _STAT: "Android file metadata",
+                _HASH: "Android SHA-256 verification",
+                _DELETE: "Android deletion",
+                _PROTOCOL_CHECK: "Android protocol probe",
+            }.get(program, "Android shell command")
+            raise _command_failure(operation, result)
         return result.stdout
 
     def _paths(self, serial: str, path: str, *, recursive: bool) -> list[str]:
@@ -248,17 +302,16 @@ class Adb:
         return result.files
 
     def check_protocol(self, serial: str) -> None:
-        """Read-only preflight: shared-storage framing and a public system-file hash."""
+        """Read-only preflight: framing, system metadata, and known-input SHA-256."""
         self._paths(serial, "/sdcard", recursive=False)
         parts = self._program(serial, _PROTOCOL_CHECK, "/sdcard").split("\x00")
-        if len(parts) != 6 or parts[0] != "PROTOCOL" or parts[-1] or parts[1] != parts[3]:
-            raise AdbError("unsupported or unstable Android protocol probe response")
+        if len(parts) != 4 or parts[0] != "PROTOCOL" or parts[-1]:
+            raise AdbError("unsupported framed Android protocol probe response")
         self._metadata(parts[1])
-        for raw in (parts[2], parts[4]):
-            fields = raw.split()
-            if len(fields) != 2 or fields[1] != "-" or not DIGEST.fullmatch(fields[0]):
-                raise AdbError("unsupported Android SHA-256 stdin format")
-        if parts[4].split()[0] != sha256(b"homeops-protocol\n").hexdigest():
+        fields = parts[2].split()
+        if len(fields) != 2 or fields[1] != "-" or not DIGEST.fullmatch(fields[0]):
+            raise AdbError("unsupported Android SHA-256 stdin format")
+        if fields[0] != sha256(b"homeops-protocol\n").hexdigest():
             raise AdbError("Android SHA-256 known-input check failed")
 
     @staticmethod

@@ -171,15 +171,7 @@ def test_read_only_protocol_probe_uses_android_formats_and_known_sha256(bad_know
         return CompletedProcess(
             args,
             0,
-            "PROTOCOL\x00"
-            + META
-            + "\x00"
-            + "a" * 64
-            + "  -\x00"
-            + META
-            + "\x00"
-            + known
-            + "  -\x00",
+            "PROTOCOL\x00" + META + "\x00" + known + "  -\x00",
             "",
         )
 
@@ -191,3 +183,63 @@ def test_read_only_protocol_probe_uses_android_formats_and_known_sha256(bad_know
         adb.check_protocol("fixture")
     assert len(calls) == 2
     assert "rm --" not in _PROTOCOL_CHECK and "find . -type f" not in _PROTOCOL_CHECK
+
+
+@pytest.mark.parametrize(
+    "returncode,stderr,reason",
+    [
+        (84, "", "access permission"),
+        (87, "stat: Permission denied", "permission failure"),
+        (88, "", "SHA-256 command failed"),
+        (92, "", "no available regular system file"),
+        (126, "", "could not be executed"),
+        (127, "sha256sum: not found", "required command is unavailable"),
+        (1, "device offline", "device offline"),
+        (3, "", "command or ADB transport failure"),
+        (0, "find: warning", "response rejected"),
+    ],
+)
+def test_command_diagnostics_preserve_operation_exit_code_and_cause(returncode, stderr, reason):
+    adb = Adb(runner=lambda args, **kwargs: CompletedProcess(args, returncode, "", stderr))
+    with pytest.raises(AdbError) as failure:
+        adb._paths("fixture", "/sdcard", recursive=False)
+    message = str(failure.value)
+    assert "Android directory enumeration" in message
+    assert f"exit {returncode}" in message
+    assert reason in message
+    if stderr:
+        assert stderr in message
+
+
+def test_device_discovery_failure_preserves_exit_code():
+    adb = Adb(runner=lambda args, **kwargs: CompletedProcess(args, 1, "", "server failed"))
+    with pytest.raises(AdbError, match=r"ADB device discovery failed \(exit 1.*server failed"):
+        adb.devices()
+
+
+def test_device_discovery_allows_successful_adb_daemon_startup_diagnostics():
+    adb = Adb(
+        runner=lambda args, **kwargs: CompletedProcess(
+            args, 0, "List of devices attached\nfixture device\n", "* daemon started successfully\n"
+        )
+    )
+    assert adb.devices()[0].state == "device"
+
+
+@pytest.mark.parametrize(
+    "response,reason",
+    [
+        ("invalid", "unsupported framed"),
+        ("PROTOCOL\x00unsupported\x00" + "a" * 64 + "  -\x00", "unsupported Android stat"),
+        ("PROTOCOL\x00" + META + "\x00invalid\x00", "unsupported Android SHA-256 stdin"),
+    ],
+)
+def test_protocol_format_errors_are_distinct_from_failed_commands(response, reason):
+    import shlex
+
+    def runner(args, **kwargs):
+        output = "DIRECTORY\x00" if args[-1] == shlex.quote(_LIST) else response
+        return CompletedProcess(args, 0, output, "")
+
+    with pytest.raises(AdbError, match=reason):
+        Adb(runner=runner).check_protocol("fixture")

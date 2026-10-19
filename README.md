@@ -80,8 +80,12 @@ homeops doctor
 
 With exactly one authorized device, doctor checks the raw ADB shell, shared-storage
 path handling/NUL framing, Android stat output, and SHA-256 stdin format. It
-hashes a public system file and a fixed test string; it does not hash or change
-your videos. A missing device or unsupported protocol is reported explicitly.
+reads metadata from an available system executable and hashes only a fixed test
+string on stdin. It does not read system-file contents, hash or change your
+videos, or require `/system/build.prop` to be readable. Unavailable metadata
+candidates are skipped; if no candidate works, the probe reports failure rather
+than claiming compatibility. Diagnostics include the failed operation, exit code,
+and available stderr; malformed protocol output is reported separately.
 
 If this Mac has no HomeOps profile yet, use the one-time setup below with the
 **existing folder already configured in LocalSend**. Setup writes local TOML

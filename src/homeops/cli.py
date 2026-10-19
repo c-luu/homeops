@@ -33,10 +33,15 @@ def doctor() -> None:
         devices = adb.devices()
         typer.echo(f"ADB: available ({len(devices)} device(s))")
         if len(devices) == 1 and devices[0].state == "device":
-            adb.check_protocol(devices[0].serial)
-            typer.echo(
-                "Android shell protocol: compatible (read-only system-file probe; no video reads)"
-            )
+            try:
+                adb.check_protocol(devices[0].serial)
+            except AdbError as exc:
+                typer.echo(f"Android shell protocol: check failed: {exc}")
+            else:
+                typer.echo(
+                    "Android shell protocol: compatible "
+                    "(read-only system metadata and known-input SHA-256; no video reads)"
+                )
         else:
             typer.echo("Android shell protocol: not checked; connect exactly one authorized Pixel.")
     except AdbError as exc:

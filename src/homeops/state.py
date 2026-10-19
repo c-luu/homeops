@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,3 +46,40 @@ def state_paths(root: Path | None = None) -> StatePaths:
         cleanup_result=resolved / "cleanup-plan.result.json",
         verification_checkpoint=resolved / "verification-checkpoint.json",
     )
+
+
+def paths_for_config(config: Path | None = None) -> StatePaths:
+    effective = resolve_config_path(config)
+    return state_paths(effective.expanduser().resolve().parent)
+
+
+def check_artifacts(paths: list[Path], destination: Path) -> None:
+    canonical = [path.expanduser().resolve() for path in paths]
+    if len(set(canonical)) != len(canonical):
+        raise ValueError("operational artifact paths must be distinct")
+    if any(path.is_relative_to(destination.resolve()) for path in canonical):
+        raise ValueError("operational state must be outside the entire LocalSend destination")
+
+
+def atomic_text(path: Path, content: str) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix=".homeops-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def atomic_json(path: Path, payload: dict) -> None:
+    atomic_text(path, json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False) + "\n")

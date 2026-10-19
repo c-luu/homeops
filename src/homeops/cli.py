@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import typer
 
 from .adb import Adb, AdbError
-from .cleanup import CleanupError, create_plan
+from .cleanup import CleanupError, create_plan, revalidate, validate_plan
 from .config import ConfigError, load_config, write_config
-from .executor import apply_plan
-from .media import MediaFile, hash_file, inventory_local
-from .reports import write_checkpoint, write_human_report, write_report
-from .state import state_paths
+from .executor import execute_plan_file, unresolved_journals
+from .media import resolve_scope
+from .reports import save_verification, summary_lines
+from .state import atomic_json, check_artifacts, paths_for_config, state_paths
+from .verification import verify_media
 
 app = typer.Typer(help="Safe, reproducible personal operations.")
 android = typer.Typer()
@@ -45,7 +47,9 @@ def devices() -> None:
 
 @android.command("setup")
 def setup(
-    destination: Path = typer.Option(..., "--destination", help="Writable LocalSend backup directory."),
+    destination: Path = typer.Option(
+        ..., "--destination", help="Existing readable LocalSend destination."
+    ),
     config: Path | None = typer.Option(None, "--config"),
     roots: str = typer.Option("DCIM,Movies,Pictures,Download", "--roots"),
     delete_mode: str = typer.Option("disabled", "--delete-mode"),
@@ -55,12 +59,13 @@ def setup(
         destination = destination.expanduser().resolve()
         if not destination.exists() or not destination.is_dir():
             raise ConfigError(f"backup destination is not an existing directory: {destination}")
-        if not os.access(destination, os.W_OK):
-            raise ConfigError(f"backup destination is not writable: {destination}")
+        if not os.access(destination, os.R_OK | os.X_OK):
+            raise ConfigError(f"backup destination is not readable: {destination}")
         selected_roots = tuple(root.strip().strip("/") for root in roots.split(",") if root.strip())
         if not selected_roots:
             raise ConfigError("at least one Android source root is required")
         target = config or state_paths().config
+        check_artifacts([target], destination)
         write_config(
             target,
             destination=destination,
@@ -68,8 +73,78 @@ def setup(
             delete_mode=delete_mode,
         )
         typer.echo(f"Configured device {device.serial} in {target}")
-    except (ConfigError, AdbError, OSError) as exc:
+    except (ConfigError, AdbError, OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+def _context(config: Path | None, profile: str):
+    settings, source = load_config(config, profile=profile)
+    if settings.verification != "sha256" or profile not in settings.profiles:
+        raise ConfigError("configure a real profile with SHA-256 verification using android setup")
+    selected = settings.profiles[profile]
+    resolve_scope(selected.destination)
+    return selected, Path(source), paths_for_config(config)
+
+
+def _policy_message(selected, config_path: Path) -> None:
+    typer.echo(
+        f"Deletion policy: {selected.delete_mode}; profile: {selected.name}; config: {config_path}"
+    )
+    if selected.delete_mode == "disabled":
+        typer.echo(
+            "Execution unavailable: deletion policy is disabled. After reviewing permanent "
+            'deletion, intentionally set delete_mode = "permanent" in the existing '
+            f"[backups.{selected.name}] table of that local config. Keep dry_run = true; "
+            "every run still requires separate approvals. See README: Enable permanent "
+            "deletion. No policy was changed."
+        )
+    elif selected.delete_mode == "trash":
+        typer.echo(
+            "Execution unavailable: recoverable Android trash is unsupported. "
+            "No fallback to permanent deletion is allowed."
+        )
+
+
+def _review(report: dict, payload: dict) -> None:
+    for line in summary_lines(report, payload):
+        typer.echo(line)
+    if payload.get("blocked_reason"):
+        typer.echo(f"Cleanup blocked: {payload['blocked_reason']}")
+    for excluded in payload.get("exclusions", []):
+        typer.echo(f"Skipped plan entry: {excluded['path']}; {excluded['reason']}")
+    typer.echo(f"Plan: {payload['plan_id']}; fingerprint: {payload['fingerprint']}")
+    for entry in payload["files"]:
+        typer.echo(f"  Pixel: {entry['source']}\n    Local: {entry['destination']}")
+
+
+def _verify_run(
+    config: Path | None,
+    profile: str,
+    output: Path | None,
+    within: str | None,
+    *,
+    plan_output: Path | None = None,
+):
+    selected, config_path, paths = _context(config, profile)
+    output = output or paths.verification_report
+    artifacts = [config_path, output, output.with_suffix(".txt"), paths.verification_checkpoint]
+    if plan_output:
+        artifacts.append(plan_output)
+    check_artifacts(artifacts, selected.destination)
+    root, scope, _ = resolve_scope(selected.destination, within)
+    typer.echo(
+        f"Verifying LocalSend scope: {scope}; configured destination: {root}; "
+        f"{'recursive' if selected.recursive else 'top-level only'}"
+    )
+    report = verify_media(
+        selected,
+        Adb(),
+        within=within,
+        checkpoint=lambda data: atomic_json(paths.verification_checkpoint, data),
+    )
+    payload = create_plan(report, destination_root=selected.destination, profile=selected)
+    save_verification(report, output, payload)
+    return selected, config_path, paths, report, payload, output
 
 
 @backup.command("verify")
@@ -77,85 +152,164 @@ def verify(
     profile: str = typer.Option("pixel"),
     config: Path | None = typer.Option(None, "--config"),
     output: Path | None = typer.Option(None, "--output"),
+    within: str | None = typer.Option(
+        None, "--within", help="Existing relative LocalSend subfolder."
+    ),
 ) -> None:
     try:
-        settings, _ = load_config(config, profile=profile)
-        selected = settings.profiles[profile]
-        paths = _paths_for_config(config)
-        output = output or paths.verification_report
-        device = Adb().find_single_authorized()
-        local = inventory_local(selected.destination)
-        remote = Adb().inventory(device.serial, selected.roots)
-        sources = []
-        for item in remote:
-            source = MediaFile(item.path, Path(item.path).name, item.size, item.size is not None)
-            sources.append(source)
-        source_sizes = {item.size for item in sources if item.accessible and item.size is not None}
-        backups = [
-            hash_file(item)
-            for item in local
-            if item.accessible and item.size in source_sizes
-        ]
-        results = []
-        checkpoint = paths.verification_checkpoint
-        for source in sources:
-            candidates_by_size = [
-                backup for backup in backups
-                if source.accessible and backup.accessible and source.size == backup.size
-            ]
-            if candidates_by_size:
-                try:
-                    source.sha256 = Adb().hash_file(device.serial, source.path)
-                except AdbError as exc:
-                    source.accessible = False
-                    source.error = str(exc)
-            candidates = [
-                backup for backup in backups
-                if source.accessible and backup.accessible
-                and source.size == backup.size and source.sha256 == backup.sha256
-            ]
-            results.append(
-                {
-                    "source": source.json(),
-                    "candidates": [candidate.json() for candidate in candidates],
-                    "status": "verified" if len(candidates) == 1 else (
-                        "ambiguous" if len(candidates) > 1 else "unmatched"
-                    ),
-                }
-            )
-            write_checkpoint(results, checkpoint)
-        write_report(
-            results,
-            output,
-            device=device.serial,
-            destination_root=selected.destination,
-            source_roots=selected.roots,
-        )
-        write_human_report(results, output.with_suffix(".txt"))
-        counts = _status_counts(results)
-        typer.echo(
-            f"Matched: {counts['verified']}; unmatched: {counts['unmatched']}; "
-            f"ambiguous: {counts['ambiguous']}; cleanup-eligible: {counts['eligible']}"
-        )
-        typer.echo(f"Wrote {output}")
-    except (ConfigError, AdbError, KeyError) as exc:
+        _, _, _, report, payload, output = _verify_run(config, profile, output, within)
+        _review(report, payload)
+        typer.echo(f"Detailed reports: {output} and {output.with_suffix('.txt')}")
+        if not report["coverage_complete"] or any(e["status"] == "error" for e in report["files"]):
+            raise typer.Exit(1)
+    except (ConfigError, CleanupError, AdbError, ValueError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+@cleanup.callback(invoke_without_command=True)
+def guided_cleanup(
+    ctx: typer.Context,
+    config: Path | None = typer.Option(None, "--config"),
+    profile: str = typer.Option("pixel", "--profile"),
+    within: str | None = typer.Option(
+        None, "--within", help="Existing relative LocalSend subfolder."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Review only; never offer execution."),
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        if config is not None or within is not None or profile != "pixel" or dry_run:
+            raise typer.BadParameter(
+                "put advanced options after plan/apply; --within belongs to verify"
+            )
+        return
+    try:
+        plan_output = paths_for_config(config).cleanup_plan
+        selected, config_path, _, report, payload, output = _verify_run(
+            config, profile, None, within, plan_output=plan_output
+        )
+        atomic_json(plan_output, payload)
+        revalidate(payload, profile=selected, source_check=_source_check(Adb(), payload["device"]))
+        _review(report, payload)
+        typer.echo(f"Detailed reports: {output} and {output.with_suffix('.txt')}")
+        typer.echo(f"Reviewed plan: {plan_output}")
+        _policy_message(selected, config_path)
+        if not report["coverage_complete"] or any(e["status"] == "error" for e in report["files"]):
+            raise typer.Exit(1)
+        for prior in unresolved_journals(plan_output.parent):
+            typer.echo(
+                f"Prior unresolved deletion journal retained: {prior}; this fresh plan "
+                "requires new review and approvals before any further execution."
+            )
+        if not payload["files"] or selected.delete_mode != "permanent" or dry_run:
+            typer.echo("Read-only review complete; no media changed.")
+            return
+        if not is_interactive():
+            typer.echo(
+                "Read-only review complete; no media changed. Noninteractive execution "
+                "requires advanced cleanup apply with all explicit approval flags."
+            )
+            return
+        approval_path = plan_output.with_name(
+            f"{plan_output.stem}.{payload['plan_id']}.authorization.json"
+        )
+        check_artifacts([approval_path], selected.destination)
+        authorization = {
+            "schema": "homeops.cleanup-authorization.v2",
+            "plan_id": payload["plan_id"],
+            "plan_fingerprint": payload["fingerprint"],
+            "execution_confirmed": False,
+            "permanent_acknowledged": False,
+            "state": "awaiting-approval",
+        }
+        try:
+            atomic_json(approval_path, authorization)
+            if not typer.confirm("Execute this reviewed Pixel cleanup plan?", default=False):
+                authorization["state"] = "declined"
+                atomic_json(approval_path, authorization)
+                typer.echo("Execution declined; no media changed.")
+                return
+            authorization["execution_confirmed"] = True
+            phrase = f"DELETE {len(payload['files'])} PIXEL VIDEOS PERMANENTLY"
+            acknowledgement = typer.prompt(
+                f"Irreversible deletion has no HomeOps trash recovery. Type {phrase}"
+            )
+            if acknowledgement != phrase:
+                authorization["state"] = "declined"
+                atomic_json(approval_path, authorization)
+                typer.echo("Permanent deletion was not acknowledged; no media changed.")
+                return
+            authorization.update(state="approved", permanent_acknowledged=True)
+            atomic_json(approval_path, authorization)
+        except (typer.Abort, EOFError, KeyboardInterrupt):
+            authorization["state"] = "cancelled"
+            atomic_json(approval_path, authorization)
+            typer.echo("Approval cancelled; no media changed.")
+            return
+        try:
+            results, result_path = execute_plan_file(
+                plan_output,
+                config=config_path,
+                profile_name=profile,
+                adb=Adb(),
+                confirm=True,
+                permanent=True,
+                permanent_acknowledged=True,
+                dry_run=False,
+                expected_fingerprint=payload["fingerprint"],
+            )
+        except (ConfigError, CleanupError, AdbError, ValueError, OSError) as exc:
+            authorization.update(state="blocked", error=str(exc))
+            atomic_json(approval_path, authorization)
+            raise
+        typer.echo(f"Cleanup results: {results_summary(results)}; result: {result_path}")
+        if any(item["status"] in {"unknown", "failed"} for item in results):
+            raise typer.Exit(1)
+
+    except (ConfigError, CleanupError, AdbError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def results_summary(results: list[dict]) -> dict[str, int]:
+    return {
+        status: sum(item["status"] == status for item in results)
+        for status in ("dry-run", "deleted", "already-deleted", "unknown", "failed")
+    }
+
+
+def _source_check(adb: Adb, device: str):
+    def check(path: str, size: int, digest: str) -> bool:
+        return (
+            adb.find_single_authorized().serial == device
+            and adb.file_size(device, path) == size
+            and adb.hash_file(device, path) == digest
+        )
+
+    return check
 
 
 @cleanup.command("plan")
 def plan(
     report: Path | None = typer.Option(None, "--report"),
     output: Path | None = typer.Option(None, "--output"),
+    config: Path | None = typer.Option(None, "--config"),
+    profile: str = typer.Option("pixel", "--profile"),
 ) -> None:
-    paths = state_paths()
-    report = report or paths.verification_report
-    output = output or paths.cleanup_plan
-    data = json.loads(report.read_text(encoding="utf-8"))
-    root = Path(str(data.get("destination_root", Path.cwd())))
-    payload = create_plan(data, destination_root=root)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    typer.echo(f"Cleanup-eligible: {len(payload['files'])}; wrote {output}")
+    try:
+        selected, config_path, paths = _context(config, profile)
+        report = report or paths.verification_report
+        output = output or paths.cleanup_plan
+        check_artifacts([config_path, report, output], selected.destination)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        payload = create_plan(data, destination_root=selected.destination, profile=selected)
+        atomic_json(output, payload)
+        _review(data, payload)
+        typer.echo(f"Reviewed plan: {output}")
+    except (ConfigError, CleanupError, AdbError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @cleanup.command("apply")
@@ -169,73 +323,36 @@ def apply(
     dry_run: bool = typer.Option(True, "--dry-run/--execute"),
 ) -> None:
     try:
-        settings, _ = load_config(config, profile=profile)
-        selected = settings.profiles[profile]
-        plan = plan or _paths_for_config(config).cleanup_plan
-        if selected.delete_mode == "disabled" and not dry_run:
-            raise CleanupError("configured deletion policy is disabled")
-        if selected.delete_mode == "trash" and not dry_run:
-            raise CleanupError("configured trash deletion is not supported")
-        if not dry_run and not permanent:
-            raise CleanupError("no supported recoverable Android trash operation is configured")
-        if not dry_run and not acknowledge_permanent:
-            raise CleanupError("permanent deletion requires --acknowledge-permanent")
+        selected, config_path, paths = _context(config, profile)
+        plan = plan or paths.cleanup_plan
+        check_artifacts([config_path, plan, plan.with_suffix(".result.json")], selected.destination)
         payload = json.loads(plan.read_text(encoding="utf-8"))
-        device = Adb().find_single_authorized()
-        planned_device = payload.get("device")
-        if planned_device != device.serial:
-            raise CleanupError("cleanup plan belongs to a different Android device")
-        if not payload.get("files"):
-            typer.echo("Cleanup plan contains no eligible files; no files changed.")
-            return
-
-        adb = Adb()
-
-        def source_check(path: str, size: int, digest: str) -> bool:
-            return (
-                adb.file_size(device.serial, path) == size
-                and adb.hash_file(device.serial, path) == digest
+        validate_plan(payload, selected)
+        for prior in unresolved_journals(plan.parent):
+            typer.echo(
+                f"Prior unresolved deletion journal retained: {prior}; reconcile it or "
+                "use a fresh verified plan and new approval."
             )
-
-        results = apply_plan(
-            payload,
-            plan.with_suffix(".result.json"),
-            source_check=source_check,
-            delete_source=lambda path: adb.delete_file(device.serial, path),
+        results, result_path = execute_plan_file(
+            plan,
+            config=config,
+            profile_name=profile,
+            adb=Adb(),
             confirm=confirm,
+            permanent=permanent,
             permanent_acknowledged=acknowledge_permanent,
             dry_run=dry_run,
         )
-        counts = _status_counts(results)
-        typer.echo(
-            f"Cleanup results: dry-run {counts['dry-run']}; deleted {counts['deleted']}; "
-            f"already deleted {counts['already-deleted']}; uncertain {counts['unknown']}"
-        )
-    except (ConfigError, CleanupError, AdbError, KeyError, OSError, json.JSONDecodeError) as exc:
+        if not results:
+            typer.echo("Cleanup plan contains no eligible files; no files changed.")
+        else:
+            counts = results_summary(results)
+            typer.echo(f"Cleanup results: {counts}; result: {result_path}")
+            if counts["unknown"] or counts["failed"]:
+                raise typer.Exit(1)
+
+    except (ConfigError, CleanupError, AdbError, ValueError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-
-
-def _status_counts(results: list[dict[str, object]]) -> dict[str, int]:
-    counts = {
-        "verified": 0,
-        "unmatched": 0,
-        "ambiguous": 0,
-        "eligible": 0,
-        "dry-run": 0,
-        "deleted": 0,
-        "already-deleted": 0,
-        "unknown": 0,
-    }
-    for result in results:
-        status = str(result.get("status"))
-        if status in counts:
-            counts[status] += 1
-    counts["eligible"] = counts["verified"]
-    return counts
-
-
-def _paths_for_config(config: Path | None):
-    return state_paths(config.expanduser().parent if config else None)
 
 
 if __name__ == "__main__":

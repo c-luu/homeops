@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .state import resolve_config_path
+from .adb import validate_roots
+from .state import atomic_text, resolve_config_path
 
 
 class ConfigError(ValueError):
@@ -30,10 +32,10 @@ class Config:
 
 
 def _path(value: str) -> Path:
-    expanded = Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+    expanded = Path(os.path.expandvars(os.path.expanduser(value)))
     if not expanded.is_absolute():
         raise ConfigError(f"path must be absolute after expansion: {value}")
-    return expanded
+    return expanded.resolve()
 
 
 def load_config(path: Path | None = None, *, profile: str = "pixel") -> tuple[Config, str]:
@@ -48,6 +50,12 @@ def load_config(path: Path | None = None, *, profile: str = "pixel") -> tuple[Co
         raise ConfigError(f"invalid configuration {source}: {exc}") from exc
     defaults = raw.get("defaults", {})
     backups = raw.get("backups", {})
+    if not isinstance(defaults, dict) or not isinstance(backups, dict):
+        raise ConfigError("defaults and backups must be TOML tables")
+    if type(defaults.get("dry_run", True)) is not bool:
+        raise ConfigError("dry_run must be a boolean")
+    if defaults.get("verification", "sha256") != "sha256":
+        raise ConfigError("only SHA-256 verification is supported")
     profiles: dict[str, Profile] = {}
     for name, item in backups.items():
         if not isinstance(item, dict) or "destination" not in item:
@@ -55,10 +63,21 @@ def load_config(path: Path | None = None, *, profile: str = "pixel") -> tuple[Co
         delete_mode = str(item.get("delete_mode", defaults.get("delete_mode", "disabled")))
         if delete_mode not in {"disabled", "trash", "permanent"}:
             raise ConfigError(f"unsupported delete_mode: {delete_mode}")
+        roots = item.get("roots", list(Profile.roots))
+        try:
+            if not isinstance(roots, list):
+                raise ConfigError("roots must be an array")
+            roots = validate_roots(roots)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if type(item.get("recursive", True)) is not bool:
+            raise ConfigError("recursive must be a boolean")
+        if not isinstance(item["destination"], str):
+            raise ConfigError("destination must be a path string")
         profiles[name] = Profile(
             name=name,
             destination=_path(str(item["destination"])),
-            roots=tuple(str(root) for root in item.get("roots", Profile.roots)),
+            roots=roots,
             recursive=bool(item.get("recursive", True)),
             delete_mode=delete_mode,
         )
@@ -81,18 +100,21 @@ def write_config(
 ) -> None:
     if delete_mode not in {"disabled", "trash", "permanent"}:
         raise ConfigError(f"unsupported delete_mode: {delete_mode}")
-    path = path.expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        validate_roots(roots)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     lines = [
         "[defaults]",
         "dry_run = true",
         'verification = "sha256"',
-        f'delete_mode = "{delete_mode}"',
+        'delete_mode = "disabled"',
         "",
         "[backups.pixel]",
-        f'destination = "{destination}"',
+        f"destination = {json.dumps(str(destination))}",
+        f'delete_mode = "{delete_mode}"',
         f"recursive = {str(recursive).lower()}",
-        f"roots = [{', '.join(repr(root) for root in roots)}]",
+        f"roots = {json.dumps(list(roots))}",
         "",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_text(path, "\n".join(lines))

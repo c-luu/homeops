@@ -18,21 +18,18 @@ def test_dry_run_needs_no_confirmation_and_prints_summary(tmp_path: Path, monkey
         encoding="utf-8",
     )
     plan = tmp_path / "state" / "cleanup-plan.json"
-    plan.write_text(
-        json.dumps(
-            {
-                "device": "pixel",
-                "destination_root": str(destination),
-                "source_roots": ["DCIM"],
-                "files": [],
-            }
-        ),
-        encoding="utf-8",
-    )
 
     class FakeAdb:
         def find_single_authorized(self):
             return Device("pixel", "device")
+
+    from homeops.cleanup import create_plan
+    from homeops.verification import verify_media
+
+    selected = load_config(config)[0].profiles["pixel"]
+    report = verify_media(selected, FakeAdb())
+    payload = create_plan(report, destination_root=destination, profile=selected)
+    plan.write_text(json.dumps(payload), encoding="utf-8")
 
     monkeypatch.setattr("homeops.cli.Adb", FakeAdb)
     result = CliRunner().invoke(

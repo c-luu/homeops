@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from homeops.cleanup import CleanupError, create_plan, revalidate
 from homeops.reports import write_checkpoint, write_report
 
@@ -29,10 +31,16 @@ def test_cleanup_plan_rejects_changed_destination(tmp_path: Path) -> None:
             }
         ],
     }
-    assert create_plan(report, destination_root=tmp_path)["files"] == []
+    with pytest.raises(CleanupError, match="rerun"):
+        create_plan(report, destination_root=tmp_path)
     try:
         revalidate(
-            {"destination_root": str(tmp_path), "files": [{"source": "x", "destination": str(destination), "size": 5, "sha256": digest}]},
+            {
+                "destination_root": str(tmp_path),
+                "files": [
+                    {"source": "x", "destination": str(destination), "size": 5, "sha256": digest}
+                ],
+            },
             source_check=lambda *_: True,
         )
     except CleanupError:
@@ -57,7 +65,9 @@ def test_cleanup_plan_requires_exact_device_and_authorized_source(tmp_path: Path
             }
         ],
     }
-    assert create_plan(report, destination_root=tmp_path)["files"] == []
+    with pytest.raises(CleanupError, match="rerun"):
+        create_plan(report, destination_root=tmp_path)
 
     report["device"] = "[redacted]"
-    assert create_plan(report, destination_root=tmp_path)["files"] == []
+    with pytest.raises(CleanupError, match="rerun"):
+        create_plan(report, destination_root=tmp_path)
